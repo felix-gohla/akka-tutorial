@@ -10,6 +10,7 @@ import akka.actor.ActorRef;
 import akka.actor.PoisonPill;
 import akka.actor.Props;
 import akka.actor.Terminated;
+import de.hpi.ddm.actors.Worker.CrackChunkMessage;
 import de.hpi.ddm.structures.BloomFilter;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -120,9 +121,27 @@ public class Master extends AbstractLoggingActor {
 			return;
 		}
 		
-		// TODO: Process the lines with the help of the worker actors
-		for (String[] line : message.getLines())
-			this.log().error("Need help processing: {}", Arrays.toString(line));
+		// Idea: Chunk into equally sized parts to reduce overhead.
+		//       Parsing is done by the workers in order to facilitate parallelism.
+		final int numWorkers = this.workers.size();
+		final int numLines = message.getLines().size();
+		final int linesPerWorker = numLines / numWorkers;
+		for (int workerIdx = 0, lineStart = 0; workerIdx < numWorkers; workerIdx++) {
+			String [][] chunk;
+			if (workerIdx < numWorkers - 1) {
+				this.log().debug("Giving worker " + workerIdx + " " + linesPerWorker + " new lines.");
+				chunk = new String[linesPerWorker][];
+				message.getLines().subList(lineStart, lineStart + linesPerWorker).toArray(chunk);
+			} else {
+				final int restLines = numLines - lineStart;
+				this.log().debug("Giving worker " + workerIdx + " " + restLines + " new lines.");
+				chunk = new String[restLines][];
+				message.getLines().subList(lineStart, numLines).toArray(chunk);
+			}
+			CrackChunkMessage chunkMessage = new Worker.CrackChunkMessage(chunk);
+			this.largeMessageProxy.tell(new LargeMessageProxy.LargeMessage<>(chunkMessage, this.workers.get(workerIdx)), this.self());
+			lineStart += linesPerWorker;
+		}
 		
 		// TODO: Send (partial) results to the Collector
 		this.collector.tell(new Collector.CollectMessage("If I had results, this would be one."), this.self());

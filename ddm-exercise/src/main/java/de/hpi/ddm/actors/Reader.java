@@ -11,7 +11,6 @@ import akka.actor.Props;
 import de.hpi.ddm.singletons.ConfigurationSingleton;
 import de.hpi.ddm.singletons.DatasetDescriptorSingleton;
 import lombok.Data;
-
 public class Reader extends AbstractLoggingActor {
 
 	////////////////////////
@@ -76,14 +75,15 @@ public class Reader extends AbstractLoggingActor {
 	}
 
 	private void handle(ReadMessage message) throws Exception {
+		this.log().info("Received ReadMessage.");
 		this.sender().tell(new Master.BatchMessage(new ArrayList<>(this.buffer)), this.self());
 		
 		this.read();
 	}
 	
 	private void read() throws Exception {
-		this.buffer.clear();
 		
+		this.buffer.clear();
 		String[] line;
 		while ((this.buffer.size() < this.bufferSize) && ((line = this.reader.readNext()) != null))
 			this.buffer.add(line);

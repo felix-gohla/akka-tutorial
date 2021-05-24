@@ -4,6 +4,8 @@ import java.io.Serializable;
 import java.io.UnsupportedEncodingException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import akka.actor.AbstractLoggingActor;
@@ -48,6 +50,11 @@ public class Worker extends AbstractLoggingActor {
 		private static final long serialVersionUID = 8343040942748609598L;
 		private BloomFilter welcomeData;
 	}
+
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class CrackChunkMessage implements Serializable {
+		private String[][] lines;
+	}
 	
 	/////////////////
 	// Actor State //
@@ -85,6 +92,7 @@ public class Worker extends AbstractLoggingActor {
 				.match(MemberUp.class, this::handle)
 				.match(MemberRemoved.class, this::handle)
 				.match(WelcomeMessage.class, this::handle)
+				.match(CrackChunkMessage.class, this::handle)
 				// TODO: Add further messages here to share work between Master and Worker actors
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
@@ -121,6 +129,10 @@ public class Worker extends AbstractLoggingActor {
 	private void handle(WelcomeMessage message) {
 		final long transmissionTime = System.currentTimeMillis() - this.registrationTime;
 		this.log().info("WelcomeMessage with " + message.getWelcomeData().getSizeInMB() + " MB data received in " + transmissionTime + " ms.");
+	}
+
+	private void handle(CrackChunkMessage message) {
+		
 	}
 	
 	private String hash(String characters) {
@@ -164,5 +176,26 @@ public class Worker extends AbstractLoggingActor {
 				a[size - 1] = temp;
 			}
 		}
+	}
+
+	@Data @AllArgsConstructor
+	private class CrackEntry {
+		private long id;
+		private String name;
+		private String hashedPassword;
+		private String[] hints;
+	}
+
+	private List<CrackEntry> parseChunk(String[][] chunk) {
+		List<CrackEntry> entries = new ArrayList<>(chunk.length);
+		for (String[] line : chunk) {
+			final long id = Long.parseLong(line[0]);
+			final String name = line[1];
+			final int passwordLength = Integer.parseInt(line[3]);
+			final String hashedPassword = line[4];
+			String[] hints = Arrays.copyOfRange(line, 5, line.length);
+			entries.add(new CrackEntry(id, name, hashedPassword, hints));
+		}
+		return null;
 	}
 }
