@@ -1,9 +1,14 @@
 package de.hpi.ddm.actors;
 
 import java.io.Serializable;
+import java.util.AbstractMap;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import akka.actor.AbstractLoggingActor;
 import akka.actor.ActorRef;
@@ -12,6 +17,7 @@ import akka.actor.Props;
 import akka.actor.Terminated;
 import de.hpi.ddm.actors.Worker.CrackChunkMessage;
 import de.hpi.ddm.structures.BloomFilter;
+import de.hpi.ddm.structures.WorkItem;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -34,6 +40,8 @@ public class Master extends AbstractLoggingActor {
 		this.workers = new ArrayList<>();
 		this.largeMessageProxy = this.context().actorOf(LargeMessageProxy.props(), LargeMessageProxy.DEFAULT_NAME);
 		this.welcomeData = welcomeData;
+		this.workMap = new HashMap<>();
+		this.lineBuffer = new LinkedList<>();
 	}
 
 	////////////////////
@@ -65,6 +73,9 @@ public class Master extends AbstractLoggingActor {
 	private final List<ActorRef> workers;
 	private final ActorRef largeMessageProxy;
 	private final BloomFilter welcomeData;
+	private final HashMap<ActorRef, List<WorkItem>> workMap;
+	// Used when no workers are there to distribute work to.
+	private final List<String[]> lineBuffer;
 
 	private long startTime;
 	
@@ -117,38 +128,18 @@ public class Master extends AbstractLoggingActor {
 
 		// TODO: Stop fetching lines from the Reader once an empty BatchMessage was received; we have seen all data then
 		if (message.getLines().isEmpty()) {
-			this.terminate();
+			// this.terminate();
 			return;
 		}
-		
-		// Idea: Chunk into equally sized parts to reduce overhead.
-		//       Parsing is done by the workers in order to facilitate parallelism.
-		final int numWorkers = this.workers.size();
-		final int numLines = message.getLines().size();
-		final int linesPerWorker = numLines / numWorkers;
-		for (int workerIdx = 0, lineStart = 0; workerIdx < numWorkers; workerIdx++) {
-			String [][] chunk;
-			if (workerIdx < numWorkers - 1) {
-				this.log().debug("Giving worker " + workerIdx + " " + linesPerWorker + " new lines.");
-				chunk = new String[linesPerWorker][];
-				message.getLines().subList(lineStart, lineStart + linesPerWorker).toArray(chunk);
-			} else {
-				final int restLines = numLines - lineStart;
-				this.log().debug("Giving worker " + workerIdx + " " + restLines + " new lines.");
-				chunk = new String[restLines][];
-				message.getLines().subList(lineStart, numLines).toArray(chunk);
-			}
-			CrackChunkMessage chunkMessage = new Worker.CrackChunkMessage(chunk);
-			this.largeMessageProxy.tell(new LargeMessageProxy.LargeMessage<>(chunkMessage, this.workers.get(workerIdx)), this.self());
-			lineStart += linesPerWorker;
-		}
+
+		this.distributeWork(message.getLines());
+		this.pushWork();
 		
 		// TODO: Send (partial) results to the Collector
 		this.collector.tell(new Collector.CollectMessage("If I had results, this would be one."), this.self());
 		
 		// TODO: Fetch further lines from the Reader
 		this.reader.tell(new Reader.ReadMessage(), this.self());
-		
 	}
 	
 	protected void terminate() {
@@ -176,11 +167,141 @@ public class Master extends AbstractLoggingActor {
 		this.largeMessageProxy.tell(new LargeMessageProxy.LargeMessage<>(new Worker.WelcomeMessage(this.welcomeData), this.sender()), this.self());
 		
 		// TODO: Assign some work to registering workers. Note that the processing of the global task might have already started.
+		this.reDistributeWork();
+		this.pushWork();
 	}
 	
 	protected void handle(Terminated message) {
 		this.context().unwatch(message.getActor());
 		this.workers.remove(message.getActor());
 		this.log().info("Unregistered {}", message.getActor());
+	}
+
+	private void pushWork() {
+		Iterator<Map.Entry<ActorRef, List<WorkItem>>> it = this.workMap.entrySet().iterator();
+		while (it.hasNext()) {
+			Map.Entry<ActorRef, List<WorkItem>> entry = it.next();
+			ActorRef worker = entry.getKey();
+			long numWorkingItems = entry.getValue().stream()
+				.filter((wi) -> wi.isWorking())
+				.count();
+			List<WorkItem> itemsToStart = entry.getValue().stream()
+				.filter((wi) -> !wi.isWorking())
+				// Ensure that there are maximum 5 items are cracking.
+				.limit(Math.max(5 - numWorkingItems, 0))
+				.collect(Collectors.toList());
+
+			// Send chunks to the worker.
+			List<String[]> lines = itemsToStart.stream()
+				.map((wi) -> wi.getInputLine())
+				.collect(Collectors.toList());
+
+			if (lines.size() > 0) {
+				CrackChunkMessage msg = new CrackChunkMessage(lines);
+				this.log().debug("Sending chunk of " + lines.size() + " lines to " + worker + ".");
+				this.largeMessageProxy.tell(new LargeMessageProxy.LargeMessage<>(msg, worker), this.self());
+			}
+			// Set chunks to working.
+			itemsToStart.forEach((wi) -> wi.setWorking(true));
+		}
+	}
+
+	private void distributeWork(List<String[]> newLines) {
+		// Create all missing entries in the work map.
+		for (ActorRef worker : this.workers) {
+			this.workMap.putIfAbsent(worker, new LinkedList<WorkItem>());
+		}
+
+		if (this.workMap.size() < 1) {
+			// Currently, there are no workes, so save that for later.
+			lineBuffer.addAll(newLines);
+			return;
+		}
+
+		// Idea: Chunk into equally sized parts to reduce overhead.
+		//       Parsing is done by the workers in order to facilitate parallelism.		
+		// Find the number of work items per work map entry.
+		final List<Map.Entry<ActorRef, Integer>> entries = this.workMap.entrySet().stream()
+			.map((e) -> new AbstractMap.SimpleEntry<ActorRef, Integer>(
+				e.getKey(),
+				e.getValue().size()
+			))
+			.sorted((i1, i2) -> i1.getValue().compareTo(i2.getValue()))
+			.collect(Collectors.toList());
+
+		// Try to distribute evenly.
+		final Integer maxWorkItems = entries.get(entries.size() - 1).getValue();
+
+		// Fill up buckets.
+		for(Map.Entry<ActorRef, Integer> entry : entries) {
+			final ActorRef ref = entry.getKey();
+			List<WorkItem> items = this.workMap.get(ref);
+			final int numberItemsToAdd = maxWorkItems - items.size();
+			
+			List<WorkItem> newItems = newLines.stream()
+				.limit(numberItemsToAdd)
+				.map(l -> new WorkItem(l))
+				.collect(Collectors.toList());
+			this.log().debug("Giving worker " + ref + " " + newItems.size() + " new lines.");
+
+			newLines = newLines.subList(newItems.size(), newLines.size());
+			items.addAll(newItems);
+			this.workMap.put(ref, items);
+
+			if (newLines.size() <= 0) {
+				break;
+			}
+		}
+
+		// Distribute the rest of lines (if any) evenly.
+		final int itemsPerWorker = newLines.size() / entries.size();
+		for (int workerIdx = 0; workerIdx < entries.size() && newLines.size() > 0; workerIdx++) {
+			final ActorRef ref = entries.get(workerIdx).getKey();
+			List<WorkItem> items = this.workMap.get(ref);
+
+			// The last worker will get more items.
+			final int numberItemsToAdd = workerIdx < entries.size() - 1
+				? itemsPerWorker
+				: newLines.size();
+
+			List<WorkItem> newItems = newLines.stream()
+				.limit(numberItemsToAdd)
+				.map(line -> new WorkItem(line))
+				.collect(Collectors.toList());
+			this.log().debug("Giving worker " + ref + " " + newItems.size() + " new lines.");
+
+			newLines = newLines.subList(newItems.size(), newLines.size());
+			items.addAll(newItems);
+			this.workMap.put(ref, items);
+		}
+		assert(newLines.size() == 0);
+	}
+
+	private void reDistributeWork() {
+		// Create all missing entries in the work map.
+		for (ActorRef worker : this.workers) {
+			this.workMap.putIfAbsent(worker, new LinkedList<WorkItem>());
+		}
+
+		// Remove all unscheduled items.
+		List<String[]> notStartedLines = new LinkedList<>();
+		Iterator<Map.Entry<ActorRef, List<WorkItem>>> it = this.workMap.entrySet().iterator();
+		while (it.hasNext()) {
+			Map.Entry<ActorRef, List<WorkItem>> entry = it.next();
+			List<WorkItem> notStartedItemsForEntry = entry.getValue().stream()
+				.filter((wi) -> !wi.isWorking())
+				.collect(Collectors.toList());
+			List<String[]> notStartedLinesForEntry = notStartedItemsForEntry.stream()
+				.map((wi) -> wi.getInputLine())
+				.collect(Collectors.toList());
+			List<WorkItem> originalEntries = entry.getValue();
+			originalEntries.removeAll(notStartedItemsForEntry);
+			this.workMap.put(entry.getKey(), originalEntries);
+			notStartedLines.addAll(notStartedLinesForEntry);
+		}
+
+		notStartedLines.addAll(this.lineBuffer);
+		this.lineBuffer.clear();
+		this.distributeWork(notStartedLines);
 	}
 }

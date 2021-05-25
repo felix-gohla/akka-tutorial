@@ -6,7 +6,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.LinkedList;
 import java.util.List;
+
+import org.apache.commons.lang3.time.StopWatch;
 
 import akka.actor.AbstractLoggingActor;
 import akka.actor.ActorRef;
@@ -53,7 +57,14 @@ public class Worker extends AbstractLoggingActor {
 
 	@Data @NoArgsConstructor @AllArgsConstructor
 	public static class CrackChunkMessage implements Serializable {
-		private String[][] lines;
+		private static final long serialVersionUID = 4526037956595307001L;
+		private List<String[]> lines;
+	}
+
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class CrackLineMessage implements Serializable {
+		private static final long serialVersionUID = 1135893596825780642L;
+		private CrackEntry entry;
 	}
 	
 	/////////////////
@@ -93,6 +104,7 @@ public class Worker extends AbstractLoggingActor {
 				.match(MemberRemoved.class, this::handle)
 				.match(WelcomeMessage.class, this::handle)
 				.match(CrackChunkMessage.class, this::handle)
+				.match(CrackLineMessage.class, this::handle)
 				// TODO: Add further messages here to share work between Master and Worker actors
 				.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
 				.build();
@@ -132,7 +144,29 @@ public class Worker extends AbstractLoggingActor {
 	}
 
 	private void handle(CrackChunkMessage message) {
-		
+		this.log().info("Cracking: " + message.getLines());
+		for (String[] line : message.getLines()) {
+			CrackEntry entry = this.parseLine(line);
+			this.self().tell(new CrackLineMessage(entry), this.self());
+		}
+	}
+
+	private void handle(CrackLineMessage message) {
+		CrackEntry entry = message.getEntry();
+		// Calculate hints.
+		char arr[] = "ABCDEFGHIJK".toCharArray();
+		StopWatch sw = new StopWatch();
+		sw.start();
+		List<String> permutations = new LinkedList<>();
+		heapPermutation(arr, arr.length, permutations);
+		sw.stop();
+		this.log().debug("Creating permutations took " + sw.getNanoTime());
+		for (String permutation : permutations) {
+			String permutationHash = hash(permutation);
+			if (entry.hints.contains(permutationHash)) {
+				this.log().error("FOUND HINT: " + permutation);
+			}
+		}
 	}
 	
 	private String hash(String characters) {
@@ -154,13 +188,13 @@ public class Worker extends AbstractLoggingActor {
 	// Generating all permutations of an array using Heap's Algorithm
 	// https://en.wikipedia.org/wiki/Heap's_algorithm
 	// https://www.geeksforgeeks.org/heaps-algorithm-for-generating-permutations/
-	private void heapPermutation(char[] a, int size, int n, List<String> l) {
+	private void heapPermutation(char[] a, int size, List<String> l) {
 		// If size is 1, store the obtained permutation
 		if (size == 1)
 			l.add(new String(a));
 
 		for (int i = 0; i < size; i++) {
-			heapPermutation(a, size - 1, n, l);
+			heapPermutation(a, size - 1, l);
 
 			// If size is odd, swap first and last element
 			if (size % 2 == 1) {
@@ -183,19 +217,15 @@ public class Worker extends AbstractLoggingActor {
 		private long id;
 		private String name;
 		private String hashedPassword;
-		private String[] hints;
+		private List<String> hints;
 	}
 
-	private List<CrackEntry> parseChunk(String[][] chunk) {
-		List<CrackEntry> entries = new ArrayList<>(chunk.length);
-		for (String[] line : chunk) {
-			final long id = Long.parseLong(line[0]);
-			final String name = line[1];
-			final int passwordLength = Integer.parseInt(line[3]);
-			final String hashedPassword = line[4];
-			String[] hints = Arrays.copyOfRange(line, 5, line.length);
-			entries.add(new CrackEntry(id, name, hashedPassword, hints));
-		}
-		return null;
+	private CrackEntry parseLine(String[] line) {
+		final long id = Long.parseLong(line[0]);
+		final String name = line[1];
+		final int passwordLength = Integer.parseInt(line[3]);
+		final String hashedPassword = line[4];
+		ArrayList<String> hints = new ArrayList<>(Arrays.asList(Arrays.copyOfRange(line, 5, line.length)));
+		return new CrackEntry(id, name, hashedPassword, hints);
 	}
 }
