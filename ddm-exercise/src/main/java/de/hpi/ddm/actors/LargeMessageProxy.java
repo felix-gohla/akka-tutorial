@@ -136,11 +136,6 @@ public class LargeMessageProxy extends AbstractLoggingActor {
 	// Actor Lifecycle //
 	/////////////////////
 
-	@Override
-	public void preStart() {
-		Reaper.watchWithDefaultReaper(this);
-	}
-
 	////////////////////
 	// Actor Behavior //
 	////////////////////

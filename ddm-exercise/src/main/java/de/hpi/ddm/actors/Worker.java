@@ -166,7 +166,7 @@ public class Worker extends AbstractLoggingActor {
 
 	private void handle(WelcomeMessage message) {
 		final long transmissionTime = System.currentTimeMillis() - this.registrationTime;
-		this.log().warning("WelcomeMessage with " + message.getWelcomeData().getSizeInMB() + " MB data received in " + transmissionTime + " ms.");
+		this.log().info("WelcomeMessage with " + message.getWelcomeData().getSizeInMB() + " MB data received in " + transmissionTime + " ms.");
 
 		// This worker has nothing to do for now, send request.
 		this.sender().tell(new Master.GetNextWorkItemMessage(), this.self());
