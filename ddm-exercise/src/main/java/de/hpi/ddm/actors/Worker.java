@@ -500,7 +500,7 @@ public class Worker extends AbstractLoggingActor {
 					// Continue, the cracking function will take care.
 					this.sendContinueMessage();
 					return;
-				}	
+				}
 
 				c[loopIterator] += 1;
 				// Simulate recursive call.
