@@ -169,6 +169,12 @@ public class Master extends AbstractLoggingActor {
 	}
 
 	protected void handle(GetNextWorkItemMessage message) {
+		// If not started, tell the sender that there is no work, yet.
+		if (this.state.getStartTime() == -1) {
+			this.sender().tell(new Worker.WorkMessage(), this.self());
+			return;
+		}
+
 		// Assign some work to workers. Note that the processing of the global task might have already started.
 		if (!this.state.hasUnassignedWorkItems() && this.state.isAnyWorkLeft()) {
 			// No unassigned work left, but there's still some work left on the reader's side.

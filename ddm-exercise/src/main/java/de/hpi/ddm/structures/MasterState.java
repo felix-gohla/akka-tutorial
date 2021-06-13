@@ -39,6 +39,7 @@ public class MasterState {
 	//////////////////
 
 	public MasterState(ActorRef reader, ActorRef collector, ActorRef largeMessageProxy, BloomFilter welcomeData) {
+		this.startTime = -1;
 		this.reader = reader;
 		this.collector = collector;
 		this.largeMessageProxy = largeMessageProxy;
