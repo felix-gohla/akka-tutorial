@@ -321,6 +321,12 @@ public class Master extends AbstractLoggingActor {
 					factorial(numUniquePasswordChars).multiply(factorial(numHints - numCrackedHints))).multiply(BigInteger.valueOf((long) Math.pow(numUniquePasswordChars, passwordLength)));
 			BigInteger passwordDifficultyAfterNextHint = nextHintDifficulty.add(factorial(numAlphabetChars - numCrackedHints - 1).divide(
 					factorial(numUniquePasswordChars).multiply(factorial(numHints - numCrackedHints - 1))).multiply(BigInteger.valueOf((long) Math.pow(numUniquePasswordChars, passwordLength))));
+			this.log().debug(
+				"When cracking {} hits, password cracking difficulty is {} vs. {} for with the next hint.",
+				numCrackedHints,
+				passwordDifficulty,
+				passwordDifficultyAfterNextHint
+			);
 			if (passwordDifficulty.compareTo(passwordDifficultyAfterNextHint) < 0) {
 				return numCrackedHints;
 			}

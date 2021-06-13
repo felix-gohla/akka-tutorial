@@ -21,6 +21,13 @@ public class CrackingState {
     private LinkedList<String> uniquePasswordCharCombs;
     private Iterator<String> uniquePasswordCharCombsIterator;
 
+    // Hint cracking.
+    private char[] hintCrackingA;
+    private int hintCrackingI;
+    private int hintCrackingSize;
+    private String hintCrackedHash;
+    private int[] hintCrackingCounters;
+
     // The following two variables are per iteration of a combination of passwords.
     private LinkedList<String> possiblePasswords;
     private Iterator<String> possiblePasswordsIterator;
@@ -30,6 +37,7 @@ public class CrackingState {
         this.workItemSender = workItemSender;
         
         this.crackedHintsCounter = 0;
+        this.hintCrackedHash = null;
 
         PasswordEntry passwordEntry = message.getPasswordEntry();
         this.hintHashes = new ArrayList<>(passwordEntry.getHintHashes());
@@ -41,4 +49,7 @@ public class CrackingState {
         this.uniquePasswordCharCombs = new LinkedList<>();
     }
 
+    public boolean isCrackingHint() {
+        return this.getHintCrackingA() != null;
+    }
 }

@@ -212,13 +212,12 @@ public class Worker extends AbstractLoggingActor {
 		);
 	}
 
+	private static final long MaxMillisBeforeBreak = 930;
+
 	/**
 	 * Crack the password.
-	 * 
-	 * Pauses after:
-	 *  - each hint
-	 *  - the generation of all password combinations
-	 *  - every x iterations of hashing possible combinations
+	 *
+	 * Does pause after MaxMillisBeforeBreak milliseconds in order to allow heartbeats to come through.
 	 */
 	private boolean crack() {
 		if (this.shouldStopCracking) {
@@ -227,8 +226,34 @@ public class Worker extends AbstractLoggingActor {
 
 		PasswordEntry passwordEntry = this.crackingState.getWorkMessage().getPasswordEntry();
 
+		// Continue cracking hints.
+		if (this.crackingState.isCrackingHint()) {
+			// Check whether hint was cracked
+			final String hintHash = this.crackingState.getHintCrackedHash();
+			if (hintHash != null) {
+				this.crackingState.setCrackedHintsCounter(this.crackingState.getCrackedHintsCounter() + 1);
+				this.crackingState.getRemainingUniquePasswordCharsIterator().remove();
+				this.crackingState.getHintHashes().remove(hintHash);
+				this.log().debug(
+					"Cracked hint hash = {}, remaining unique password chars = {}",
+					hintHash,
+					this.crackingState.getRemainingUniquePasswordCharsList()
+				);
+
+				// Reset state.
+				this.crackingState.setHintCrackingA(null);
+				this.crackingState.setHintCrackingSize(0);
+				this.crackingState.setHintCrackedHash(null);
+			} else {
+				// We can continue cracking a hint.
+				this.crackHint();
+				return false;
+			}
+		}
+
 		// Crack hints, if any.
-		if (this.crackingState.getRemainingUniquePasswordCharsIterator().hasNext()
+		if (!this.crackingState.isCrackingHint()
+			&& this.crackingState.getRemainingUniquePasswordCharsIterator().hasNext()
 			&& this.crackingState.getCrackedHintsCounter() < this.crackingState.getWorkMessage().getNumHintsToCrack())
 		{
 			char nextChar = this.crackingState.getRemainingUniquePasswordCharsIterator().next();
@@ -238,16 +263,13 @@ public class Worker extends AbstractLoggingActor {
 			this.log().debug("Excluding {}...", nextChar);
 			String charsForPerms = passwordEntry.getPasswordChars().replaceAll(String.valueOf(nextChar), "");
 			this.log().debug("charsForPerms = " + charsForPerms);
-			String permHash = permuteAndCompare(charsForPerms.toCharArray(), passwordEntry.getPasswordChars().length() - 1, this.crackingState.getHintHashes());
-			if (permHash != null) {
-				this.crackingState.setCrackedHintsCounter(this.crackingState.getCrackedHintsCounter() + 1);
-				this.crackingState.getRemainingUniquePasswordCharsIterator().remove();
-				this.crackingState.getHintHashes().remove(permHash);
-				this.log().debug("Cracked hint, remaining unique password chars = " + this.crackingState.getRemainingUniquePasswordCharsList());
-			}
 
-			// Small pause. :)
-			this.self().tell(new JustContinueMessage(), this.self());
+			this.crackingState.setHintCrackingA(charsForPerms.toCharArray());
+			this.crackingState.setHintCrackingSize(passwordEntry.getPasswordChars().length() - 1);
+			this.crackingState.setHintCrackingI(0);
+
+			this.crackHint();
+
 			return false;
 		}
 
@@ -281,7 +303,7 @@ public class Worker extends AbstractLoggingActor {
 				this.crackingState.getUniquePasswordCharCombs().add(String.valueOf(c));
 			}
 			LinkedList<String> helperQueue = new LinkedList<>();
-	
+
 			// Until we have combinations of the required length, take each stored unique comb of chars from the queue
 			// and append each unique char to it, put back in the queue, repeat.
 			while (this.crackingState.getUniquePasswordCharCombs().peek().length() != numUniquePasswordChars) {
@@ -304,21 +326,21 @@ public class Worker extends AbstractLoggingActor {
 				helperQueue = tmp;
 			}
 			this.log().debug("Generated {} combinations", this.crackingState.getUniquePasswordCharCombs().size());
-	
+
 			if (this.crackingState.getWorkMessage().isRandomized()) {
 				this.log().debug("Will shuffle the combinations.");
 				Collections.shuffle(this.crackingState.getUniquePasswordCharCombs());
 			}
 
 			this.crackingState.setUniquePasswordCharCombsIterator(this.crackingState.getUniquePasswordCharCombs().iterator());
-			this.self().tell(new JustContinueMessage(), this.self());
+			this.sendContinueMessage();
 			return false;
 		}
 
 		// Crack passwords if given.
 		if (this.crackingState.getPossiblePasswordsIterator() != null) {
 			this.log().debug("Cracking password...");
-			long iterations = 0;
+			final long start = System.currentTimeMillis();
 			while (this.crackingState.getPossiblePasswordsIterator().hasNext()) {
 				String possiblePassword = this.crackingState.getPossiblePasswordsIterator().next();
 				if (hash(possiblePassword).equals(passwordEntry.getPasswordHash())) {
@@ -333,8 +355,9 @@ public class Worker extends AbstractLoggingActor {
 				this.crackingState.getPossiblePasswordsIterator().remove();
 
 				// If we take to long, small pause.
-				if (iterations++ > 100000) {
-					this.self().tell(new JustContinueMessage(), this.self());
+				final long timeDiff = System.currentTimeMillis() - start;
+				if (timeDiff > MaxMillisBeforeBreak) {
+					this.sendContinueMessage();
 					return false;
 				}
 			}
@@ -371,7 +394,7 @@ public class Worker extends AbstractLoggingActor {
 			this.crackingState.setPossiblePasswords(possiblePasswords);
 			this.crackingState.setPossiblePasswordsIterator(possiblePasswords.iterator());
 
-			this.self().tell(new JustContinueMessage(), this.self());
+			this.sendContinueMessage();
 			return false;
 		}
 		this.log().error("The password with hash {} could not be cracked.", passwordEntry.getPasswordHash());
@@ -389,6 +412,10 @@ public class Worker extends AbstractLoggingActor {
 
 	private void handle(StopCrackMessage message) {
 		this.stopCracking();
+	}
+
+	private void sendContinueMessage() {
+		this.self().tell(new JustContinueMessage(), this.self());
 	}
 
 	private void stopCracking() {
@@ -413,42 +440,92 @@ public class Worker extends AbstractLoggingActor {
 		}
 	}
 
+	private boolean checkPermutation(char[] a) {
+		String permHash = this.hash(new String(a));
+		if (this.crackingState.getHintHashes().contains(permHash)) {
+			this.crackingState.setHintCrackedHash(permHash);
+			return true;
+		}
+		return false;
+	}
+
 	/**
-	 * @return the hash of the permutation that matched one of the hint hashes
+	 * Generating all permutations of an array using Heap's Algorithm ITERATIVELY
+	 * https://en.wikipedia.org/wiki/Heap's_algorithm
+	 *
+	 * Does pause after MaxMillisBeforeBreak milliseconds in order to allow heartbeats to come through.
 	 */
-	// Generating all permutations of an array using Heap's Algorithm
-	// https://en.wikipedia.org/wiki/Heap's_algorithm
-	// https://www.geeksforgeeks.org/heaps-algorithm-for-generating-permutations/
-	private String permuteAndCompare(char[] a, int size, List<String> hintHashes) {
-		// If size is 1, compare the hash of the obtained permutation with the hint hashes
-		String permHash;
-		if (size == 1) {
-			permHash = this.hash(new String(a));
-			if (hintHashes.contains(permHash)) {
-				return permHash;
+	private void crackHint() {
+		char[] a = this.crackingState.getHintCrackingA();
+		final int previousI = this.crackingState.getHintCrackingI();
+		final int size = this.crackingState.getHintCrackingSize();
+		assert a != null;
+
+		int loopIterator;
+		int[] c;
+		if (previousI == 0) {
+			// New hint being cracked, initialize state.
+			c = new int[size];
+			Arrays.fill(c, 0);
+			this.crackingState.setHintCrackingCounters(c);
+			loopIterator = 1;
+		} else {
+			c = this.crackingState.getHintCrackingCounters();
+			loopIterator = previousI;
+		}
+
+		final long start = System.currentTimeMillis();
+
+		if (this.checkPermutation(a)) {
+			this.sendContinueMessage();
+			return;
+		}
+
+		while (loopIterator < size) {
+			if (c[loopIterator] < loopIterator) {
+				char temp;
+				if (loopIterator % 2 == 0) {
+					// If size is even, swap i-th and first element
+					temp = a[0];
+					a[0] = a[loopIterator];
+				}
+				else {
+					// If size is odd, swap i-th and counter loop element
+					temp = a[c[loopIterator]];
+					a[c[loopIterator]] = a[loopIterator];
+				}
+				a[loopIterator] = temp;
+
+				if (this.checkPermutation(a)) {
+					// Found a hash.
+					// Continue, the cracking function will take care.
+					this.sendContinueMessage();
+					return;
+				}
+
+				c[loopIterator] += 1;
+				// Simulate recursive call.
+				loopIterator = 1;
+			} else {
+				c[loopIterator] = 0;
+				loopIterator += 1;
+			}
+			// We should take a small break.
+			final long timeDiff = System.currentTimeMillis() - start;
+			if (timeDiff > MaxMillisBeforeBreak) {
+				// Save the state.
+				this.crackingState.setHintCrackingA(a);
+				this.crackingState.setHintCrackingCounters(c);
+				this.crackingState.setHintCrackingI(loopIterator);
+				this.crackingState.setHintCrackingSize(size);
+				this.sendContinueMessage();
+				return;
 			}
 		}
 
-		for (int i = 0; i < size; i++) {
-			permHash = permuteAndCompare(a, size - 1, hintHashes);
-			if (permHash != null) {
-				return permHash;
-			}
-
-			// If size is odd, swap first and last element
-			char temp;
-			if (size % 2 == 1) {
-				temp = a[0];
-				a[0] = a[size - 1];
-			}
-
-			// If size is even, swap i-th and last element
-			else {
-				temp = a[i];
-				a[i] = a[size - 1];
-			}
-			a[size - 1] = temp;
-		}
-		return null;
+		// We tried all combinations and found nothing.
+		this.crackingState.setHintCrackingA(null);
+		this.crackingState.setHintCrackedHash(null);
+		this.sendContinueMessage();
 	}
 }
