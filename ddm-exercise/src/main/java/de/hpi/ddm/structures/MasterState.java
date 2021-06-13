@@ -1,13 +1,7 @@
 package de.hpi.ddm.structures;
-
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.PriorityQueue;
-import java.util.Queue;
-import java.util.Set;
 import java.util.TreeSet;
 
 import akka.actor.ActorRef;
@@ -29,6 +23,7 @@ public class MasterState {
 	// ==========
 
 	private final TreeSet<WorkItem> workItems = new TreeSet<>(new WorkItemComparator());
+	private final List<WorkItem> uncrackableWorkItems = new LinkedList<>();
 
 	private int numHintsToCrack;  // num hints to crack before cracking a password
 
@@ -110,5 +105,15 @@ public class MasterState {
 		crackedItem.setCracked(true);
 		crackedItem.getWorkersCracking().remove(crackedBy);
 		return crackedItem;
+	}
+
+	public WorkItem setUncrackable(int passwordId, ActorRef reportedBy) throws NoSuchElementException {
+		final WorkItem uncrackableItem = this.findWorkItemForPasswordId(passwordId);
+		if (uncrackableItem == null || !this.getWorkItems().remove(uncrackableItem)) {
+			throw new NoSuchElementException("The WorkItem with password id " + passwordId + " was not found.");
+		}
+		this.getUncrackableWorkItems().add(uncrackableItem);
+		uncrackableItem.getWorkersCracking().remove(reportedBy);
+		return uncrackableItem;
 	}
 }

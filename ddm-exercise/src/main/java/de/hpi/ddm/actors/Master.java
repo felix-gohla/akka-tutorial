@@ -62,6 +62,16 @@ public class Master extends AbstractLoggingActor {
 		private String crackedPassword;
 	}
 
+	/**
+	 * A message with the results that a password entry was not
+	 * crackable after trying all combinations.
+	 */
+	@Data @NoArgsConstructor @AllArgsConstructor
+	public static class UncrackablePasswordMessage implements Serializable {
+		private static final long serialVersionUID = 478389748817636935L;
+		private int id;
+	}
+
 	@Data
 	public static class GetNextWorkItemMessage implements Serializable {
 		private static final long serialVersionUID = 3820580630641612339L;
@@ -94,6 +104,7 @@ public class Master extends AbstractLoggingActor {
 			.match(RegistrationMessage.class, this::handle)
 			.match(BatchMessage.class, this::handle)
 			.match(CrackedPasswordMessage.class, this::handle)
+			.match(UncrackablePasswordMessage.class, this::handle)
 			.match(GetNextWorkItemMessage.class, this::handle)
 			.match(Terminated.class, this::handle)
 			.matchAny(object -> this.log().info("Received unknown message: \"{}\"", object.toString()))
@@ -227,6 +238,40 @@ public class Master extends AbstractLoggingActor {
 		// We are very polite.
 		this.sender().tell(new Worker.ThanksForCrackMessage(), this.self());
 
+		this.checkAllPasswordsProcessed();
+	}
+
+	private void handle(UncrackablePasswordMessage uncrackablePasswordMessage) {
+		try {
+			WorkItem uncrackableItem = this.state.setUncrackable(uncrackablePasswordMessage.getId(), this.sender());
+			this.log().error(
+				"Received message that password {} for {} (hash {}) could not be cracked, stopping others cracking that password...",
+				uncrackableItem.getPasswordEntry().getId(),
+				uncrackableItem.getPasswordEntry().getName(),
+				uncrackableItem.getPasswordEntry().getPasswordHash()
+			);
+			for (ActorRef workingActor : uncrackableItem.getWorkersCracking()) {
+				this.log().info("Telling {} to stop current cracking.", workingActor);
+				workingActor.tell(new Worker.StopCrackMessage(), this.self());
+			}
+		} catch (NoSuchElementException ex) {
+			this.log().error("Password {} was somehow cracked this should not happen.", uncrackablePasswordMessage.getId());
+		}
+
+		// We are very polite.
+		// In fact, it is necessary to send this message in order for the worker to fetch the next password.
+		this.sender().tell(new Worker.ThanksForCrackMessage(), this.self());
+
+		this.checkAllPasswordsProcessed();
+	}
+
+	protected void handle(Terminated message) {
+		this.context().unwatch(message.getActor());
+		this.state.getWorkers().remove(message.getActor());
+		this.log().info("Unregistered {}", message.getActor());
+	}
+
+	private void checkAllPasswordsProcessed() {
 		// Everything done.
 		if (!this.state.hasUncrackedPasswords()) {
 			if (!this.state.isAnyWorkLeft()) {
@@ -244,13 +289,8 @@ public class Master extends AbstractLoggingActor {
 		}
 	}
 
-	protected void handle(Terminated message) {
-		this.context().unwatch(message.getActor());
-		this.state.getWorkers().remove(message.getActor());
-		this.log().info("Unregistered {}", message.getActor());
-	}
-
 	protected void terminate() {
+		// Maybe we should also care about uncrackable passwords here, but... naah... :shrug:.
 		this.state.getCollector().tell(new Collector.PrintMessage(), this.self());
 
 		this.state.getReader().tell(PoisonPill.getInstance(), ActorRef.noSender());

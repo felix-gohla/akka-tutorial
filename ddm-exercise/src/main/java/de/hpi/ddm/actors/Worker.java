@@ -375,6 +375,10 @@ public class Worker extends AbstractLoggingActor {
 			return false;
 		}
 		this.log().error("The password with hash {} could not be cracked.", passwordEntry.getPasswordHash());
+		this.crackingState.getWorkItemSender().tell(
+			new Master.UncrackablePasswordMessage(passwordEntry.getId()),
+			this.self()
+		);
 		return false;
 	}
 
