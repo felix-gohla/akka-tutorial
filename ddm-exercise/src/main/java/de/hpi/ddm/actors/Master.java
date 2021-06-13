@@ -229,10 +229,10 @@ public class Master extends AbstractLoggingActor {
 			result,
 			this.sender()
 		);
-		this.state.getCollector().tell(new Collector.CollectMessage(result), this.self());
 
 		try {
 			WorkItem crackedItem = this.state.removeCracked(crackedPasswordMessage.getId(), this.sender());
+			this.state.getCollector().tell(new Collector.CollectMessage(result), this.self());
 			for (ActorRef workingActor : crackedItem.getWorkersCracking()) {
 				this.log().info("Telling {} to stop current cracking.", workingActor);
 				workingActor.tell(new Worker.StopCrackMessage(), this.self());
@@ -250,7 +250,7 @@ public class Master extends AbstractLoggingActor {
 	private void handle(UncrackablePasswordMessage uncrackablePasswordMessage) {
 		try {
 			WorkItem uncrackableItem = this.state.setUncrackable(uncrackablePasswordMessage.getId(), this.sender());
-			this.log().error(
+			this.log().warning(
 				"Received message that password {} for {} (hash {}) could not be cracked, stopping others cracking that password...",
 				uncrackableItem.getPasswordEntry().getId(),
 				uncrackableItem.getPasswordEntry().getName(),

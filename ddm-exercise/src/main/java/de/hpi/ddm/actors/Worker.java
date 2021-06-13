@@ -8,6 +8,8 @@ import java.time.Duration;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import org.apache.commons.lang3.RandomUtils;
+
 import akka.actor.AbstractLoggingActor;
 import akka.actor.ActorRef;
 import akka.actor.PoisonPill;
@@ -195,10 +197,7 @@ public class Worker extends AbstractLoggingActor {
 			workMessage.getPasswordEntry().getId(),
 			workMessage.getPasswordEntry().getName()
 		);
-		Futures.future(
-			() -> this.crack(),
-			this.getContext().dispatcher()
-		);
+		this.crack();
 	}
 
 	private void handle(JustContinueMessage message) {
@@ -206,13 +205,10 @@ public class Worker extends AbstractLoggingActor {
 			return;
 		}
 		this.log().debug("Got continue message.");
-		Futures.future(
-			() -> this.crack(),
-			this.getContext().dispatcher()
-		);
+		this.crack();
 	}
 
-	private static final long MaxMillisBeforeBreak = 930;
+	private static final long MaxMillisBeforeBreak = 970;
 
 	/**
 	 * Crack the password.
@@ -244,6 +240,7 @@ public class Worker extends AbstractLoggingActor {
 				this.crackingState.setHintCrackingA(null);
 				this.crackingState.setHintCrackingSize(0);
 				this.crackingState.setHintCrackedHash(null);
+				this.crackingState.setHintCrackingI(0);
 			} else {
 				// We can continue cracking a hint.
 				this.crackHint();
@@ -269,7 +266,6 @@ public class Worker extends AbstractLoggingActor {
 			this.crackingState.setHintCrackingI(0);
 
 			this.crackHint();
-
 			return false;
 		}
 
@@ -443,6 +439,7 @@ public class Worker extends AbstractLoggingActor {
 	private boolean checkPermutation(char[] a) {
 		String permHash = this.hash(new String(a));
 		if (this.crackingState.getHintHashes().contains(permHash)) {
+			this.log().debug("Found permutation: hash({})={}.", new String(a), permHash);
 			this.crackingState.setHintCrackedHash(permHash);
 			return true;
 		}
@@ -456,6 +453,8 @@ public class Worker extends AbstractLoggingActor {
 	 * Does pause after MaxMillisBeforeBreak milliseconds in order to allow heartbeats to come through.
 	 */
 	private void crackHint() {
+		this.log().debug("Cracking hint...");
+
 		char[] a = this.crackingState.getHintCrackingA();
 		final int previousI = this.crackingState.getHintCrackingI();
 		final int size = this.crackingState.getHintCrackingSize();
@@ -501,7 +500,7 @@ public class Worker extends AbstractLoggingActor {
 					// Continue, the cracking function will take care.
 					this.sendContinueMessage();
 					return;
-				}
+				}	
 
 				c[loopIterator] += 1;
 				// Simulate recursive call.
@@ -510,6 +509,7 @@ public class Worker extends AbstractLoggingActor {
 				c[loopIterator] = 0;
 				loopIterator += 1;
 			}
+
 			// We should take a small break.
 			final long timeDiff = System.currentTimeMillis() - start;
 			if (timeDiff > MaxMillisBeforeBreak) {
@@ -524,6 +524,7 @@ public class Worker extends AbstractLoggingActor {
 		}
 
 		// We tried all combinations and found nothing.
+		this.log().debug("No permutations found with {}.", Arrays.toString(a));
 		this.crackingState.setHintCrackingA(null);
 		this.crackingState.setHintCrackedHash(null);
 		this.sendContinueMessage();
